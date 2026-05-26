@@ -1,0 +1,816 @@
+import tkinter as tk
+from tkinter import ttk
+
+import base64
+import hashlib
+import io
+import json
+import os
+import re
+import sys
+import threading
+from datetime import datetime, timezone, timedelta, date
+from pathlib import Path
+
+try:
+    from PIL import Image, ImageGrab, ImageEnhance, ImageTk
+except ImportError:
+    raise SystemExit("Falta Pillow: pip install Pillow")
+
+try:
+    import anthropic
+except ImportError:
+    raise SystemExit("Falta anthropic: pip install anthropic")
+
+import audit
+import update_manager
+import graph_client
+
+
+APP_VERSION = "1.0.0"
+LIMA_TZ = timezone(timedelta(hours=-5), name="PET")
+
+
+def now_lima() -> datetime:
+    return datetime.now(LIMA_TZ).replace(tzinfo=None)
+
+
+def today_lima() -> date:
+    return datetime.now(LIMA_TZ).date()
+
+
+# ── Auditoría ──────────────────────────────────────────────────────────────────
+AUDIT_ENDPOINT = "https://project-legacy-audit.vercel.app/api/audit/polizas3420"
+AUDIT_API_KEY  = "Ab3_Q9kL2Mx7P0eRZDfTN4H5S8aCWYJpU6B1oVdKiErsF_GnXqm2cO7A9wLQPZt5R0D8h4yN6fKJMeS1B_CapxVOWgT3UdlIHR7n"
+
+
+def _app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = _app_dir()
+
+def _resource_path(name: str) -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / name
+    return APP_DIR / name
+
+
+def set_window_icon(win):
+    try:
+        ico = _resource_path("icon.ico")
+        if ico.exists():
+            try:
+                win.iconbitmap(default=str(ico))
+            except tk.TclError:
+                win.iconbitmap(str(ico))
+    except Exception:
+        pass
+
+# ── API Key encriptada ─────────────────────────────────────────────────────────
+ENCRYPTED_API_KEY = "HczQewI6Tutf4fdlszW4DvXiLv0z3YQn/P9oayxkkiAB085XAD8I82vjpQ7uSZ1d98c43lTemzbhiX1YBT3ydT7WySgrIQDpYdm3LK0ljnem61nuaq/xDMy7W3swE5VcC/2aNz8+OsdD/4YX"
+PWD_FILE = APP_DIR / ".pwd"
+
+
+def _xor(data: bytes, key: bytes) -> bytes:
+    return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+
+def decrypt_api_key(password: str) -> str:
+    key = hashlib.sha256(password.encode()).digest()
+    return _xor(base64.b64decode(ENCRYPTED_API_KEY), key).decode()
+
+
+def _machine_secret() -> bytes:
+    seed = (os.environ.get("USERNAME", "")
+            + os.environ.get("COMPUTERNAME", "")
+            + str(Path.home()))
+    return hashlib.sha256(seed.encode()).digest()
+
+
+def save_password(pwd: str):
+    PWD_FILE.write_bytes(base64.b64encode(_xor(pwd.encode(), _machine_secret())))
+
+
+def load_password() -> str:
+    return _xor(base64.b64decode(PWD_FILE.read_bytes()), _machine_secret()).decode()
+
+
+# ── Ventana de activación ──────────────────────────────────────────────────────
+def ask_password_gui() -> tuple:
+    root = tk.Tk()
+    root.withdraw()
+    set_window_icon(root)
+    win = tk.Toplevel(root)
+    win.title("Activación")
+    set_window_icon(win)
+    win.geometry("420x320")
+    win.resizable(False, False)
+    win.configure(bg="#F7F9FC")
+    win.update_idletasks()
+    win.geometry(f"+{(win.winfo_screenwidth()-420)//2}+{(win.winfo_screenheight()-320)//2}")
+    win.protocol("WM_DELETE_WINDOW", root.destroy)
+    result = {"pwd": "", "api_key": ""}
+
+    tk.Label(win, text="🔑", font=("Segoe UI", 36), bg="#F7F9FC").pack(pady=(20, 0))
+    tk.Label(win, text="Ingresa tu código de activación",
+             font=("Segoe UI", 13, "bold"), fg="#1B3F6E", bg="#F7F9FC").pack()
+    tk.Label(win, text="Solicítalo a tu supervisor.\nSolo se pedirá una vez.",
+             font=("Segoe UI", 10), fg="#6B7A8D", bg="#F7F9FC", justify="center").pack(pady=(4, 14))
+
+    ef = tk.Frame(win, bg="#F7F9FC")
+    ef.pack(padx=32, fill="x")
+    entry = tk.Entry(ef, show="•", font=("Segoe UI", 12), relief="flat", bd=0,
+                     bg="white", highlightthickness=1, highlightbackground="#C9D8EC",
+                     highlightcolor="#1B3F6E", justify="center")
+    entry.pack(fill="x", ipady=9, padx=2)
+    entry.focus()
+    err_lbl = tk.Label(win, text="", fg="#993C1D", bg="#F7F9FC", font=("Segoe UI", 9))
+    err_lbl.pack(pady=(4, 0))
+
+    def confirm(event=None):
+        pwd = entry.get().strip()
+        if not pwd:
+            err_lbl.configure(text="⚠  Ingresa el código de activación")
+            return
+        try:
+            api_key = decrypt_api_key(pwd)
+            if not api_key.startswith("sk-ant-"):
+                raise ValueError()
+            result["pwd"] = pwd
+            result["api_key"] = api_key
+            root.destroy()
+        except Exception:
+            err_lbl.configure(text="⚠  Código incorrecto, intenta de nuevo")
+            entry.configure(highlightbackground="#E24B4A")
+            entry.delete(0, "end")
+
+    entry.bind("<Return>", confirm)
+    tk.Button(win, text="Activar →", font=("Segoe UI", 11, "bold"),
+              bg="#1B3F6E", fg="white", activebackground="#142E52",
+              activeforeground="white", relief="flat", padx=20, pady=9,
+              cursor="hand2", bd=0, command=confirm).pack(pady=(10, 0))
+    root.mainloop()
+    return result["pwd"], result["api_key"]
+
+
+def get_api_key() -> str:
+    if PWD_FILE.exists():
+        try:
+            pwd = load_password()
+            api_key = decrypt_api_key(pwd)
+            if api_key.startswith("sk-ant-"):
+                return api_key
+        except Exception:
+            try:
+                PWD_FILE.unlink()
+            except Exception:
+                pass
+    pwd, api_key = ask_password_gui()
+    if not api_key:
+        raise SystemExit("Código de activación requerido.")
+    save_password(pwd)
+    return api_key
+
+
+API_KEY = get_api_key()
+
+audit.init(endpoint_url=AUDIT_ENDPOINT, api_key=AUDIT_API_KEY, app_version=APP_VERSION)
+audit.log("app_start", success=True)
+
+
+def fmt_tasa(v) -> str:
+    """Convierte número a porcentaje con coma decimal (ej: 4.41 → '4,41%')."""
+    if v is None:
+        return ""
+    try:
+        return str(float(v)).replace(".", ",") + "%"
+    except Exception:
+        return str(v)
+
+
+# ── Claude ─────────────────────────────────────────────────────────────────────
+CLAUDE_MODEL = "claude-sonnet-4-5"
+
+PROMPT = """Analiza esta imagen de una póliza bursátil y extrae SOLO los datos indicados.
+
+FORMATOS POSIBLES:
+
+COMPRA — encabezado "COMPRA" o "PÓLIZA DE COMPRA":
+- Extrae: fondo/ticker, cantidad de cuotas y monto neto de la póliza
+- Si hay dos tablas lado a lado (compra + venta simulada), toma SOLO la de compra
+- tipo = "COMPRA"
+
+VENTA — encabezado "VENTA" o "PÓLIZA DE VENTA":
+- Extrae: fondo/ticker, cantidad de cuotas, monto neto (usa "Monto Neto (cliente)" si existe, sino "Monto de Póliza")
+- El encabezado tiene: tipo | nombre del cliente | número (código SAB)
+- nombre_cliente: texto antes de " Y " si hay "Y PAREJA" o similar; si no hay " Y ", todo el nombre
+- numero_orden: número entero en la esquina derecha del encabezado (es el código SAB)
+- tipo = "VENTA"
+
+PLAZO: Busca en el texto una duración de la inversión:
+- Texto como "X días" → devuelve "X DÍAS" (ej: "26 días" → "26 DÍAS")
+- Texto como "X meses" → devuelve "X MESES" (ej: "3 meses" → "3 MESES")
+- Texto como "1 año" o "12 meses" → devuelve "1 AÑO"
+- También puede aparecer como "FL1: DD/MM/AA" y "FL2: DD/MM/AA" — calcula los días de diferencia entre ambas fechas
+- Si no encuentras el plazo, devuelve null
+
+TASA: Busca el porcentaje de rentabilidad o rendimiento estimado:
+- Aparece en frases como "rentabilidad estimada...sería X,XX%" o "X.XX%"
+- También puede aparecer como "Utilidad Partícipe (sin IGK): X,XX%"
+- Devuelve el valor como número sin el símbolo % (ej: 4.41 para "4,41%")
+- Si no encuentras la tasa, devuelve null
+
+REGLAS:
+- Montos: sin símbolos ni separadores de miles, punto decimal (ej: 14574.51)
+- El fondo es el código del instrumento con su número separado por espacio (ej: "ICMP 17", "PRIME 14", "ICMP 13") — conservar el espacio
+- Campos inexistentes: null
+
+Devuelve ÚNICAMENTE este JSON sin texto adicional ni markdown:
+{
+  "tipo": "COMPRA" o "VENTA",
+  "ticker": "código del instrumento con espacio",
+  "cantidad": número entero o null,
+  "monto_compra": número o null,
+  "monto_venta": número o null,
+  "numero_orden": número entero o null,
+  "nombre_cliente": "texto" o null,
+  "plazo": "ej: 26 DÍAS, 1 AÑO, 3 MESES" o null,
+  "tasa": número o null
+}"""
+
+
+def img_to_b64(img: Image.Image) -> str:
+    img = img.convert("RGB")
+    img = ImageEnhance.Contrast(img).enhance(1.3)
+    img = ImageEnhance.Sharpness(img).enhance(1.2)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return base64.standard_b64encode(buf.getvalue()).decode()
+
+
+def call_claude(img: Image.Image) -> dict:
+    import time as _t
+    client = anthropic.Anthropic(api_key=API_KEY)
+    img_w, img_h = img.size
+    t0 = _t.perf_counter()
+    in_tok = out_tok = None
+    try:
+        resp = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=700,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                 "media_type": "image/jpeg", "data": img_to_b64(img)}},
+                {"type": "text", "text": PROMPT},
+            ]}],
+        )
+        try:
+            in_tok  = getattr(resp.usage, "input_tokens",  None)
+            out_tok = getattr(resp.usage, "output_tokens", None)
+        except Exception:
+            pass
+        parts = [getattr(b, "text", None) for b in getattr(resp, "content", [])]
+        raw   = "\n".join(p for p in parts if p).strip()
+        if not raw:
+            raise json.JSONDecodeError("Respuesta vacía", "", 0)
+        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        data  = json.loads(clean)
+        audit.log("claude_call", success=True, model_name=CLAUDE_MODEL,
+                  input_tokens=in_tok if isinstance(in_tok, int) else None,
+                  output_tokens=out_tok if isinstance(out_tok, int) else None,
+                  duration_ms=int((_t.perf_counter() - t0) * 1000),
+                  metadata={"img_w": img_w, "img_h": img_h})
+        return data
+    except Exception as e:
+        audit.log("claude_call", success=False, model_name=CLAUDE_MODEL,
+                  input_tokens=in_tok if isinstance(in_tok, int) else None,
+                  output_tokens=out_tok if isinstance(out_tok, int) else None,
+                  duration_ms=int((_t.perf_counter() - t0) * 1000),
+                  metadata={"img_w": img_w, "img_h": img_h,
+                            "error_type": type(e).__name__[:50]})
+        raise
+
+
+# ── Clipboard helpers ──────────────────────────────────────────────────────────
+def _resample_filter():
+    try:
+        return Image.Resampling.LANCZOS
+    except AttributeError:
+        return Image.LANCZOS
+
+
+def _normalize_image(img: Image.Image) -> Image.Image:
+    if img.mode not in ("RGB", "L"):
+        bg = Image.new("RGB", img.size, "white")
+        try:
+            bg.paste(img, mask=img.getchannel("A"))
+            return bg
+        except Exception:
+            return img.convert("RGB")
+    return img.convert("RGB")
+
+
+def _open_image_file(path) -> "Image.Image | None":
+    try:
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            return None
+        with Image.open(p) as im:
+            im.load()
+            return _normalize_image(im)
+    except Exception:
+        return None
+
+
+def _get_clipboard_image() -> "Image.Image | None":
+    clip = ImageGrab.grabclipboard()
+    if isinstance(clip, Image.Image):
+        return _normalize_image(clip)
+    if isinstance(clip, list):
+        for path in clip:
+            img = _open_image_file(path)
+            if img is not None:
+                return img
+    return None
+
+
+def _image_fingerprint(img: Image.Image) -> str:
+    small = img.copy()
+    small.thumbnail((96, 96), _resample_filter())
+    small = small.convert("RGB")
+    h = hashlib.sha256()
+    h.update(f"{img.size[0]}x{img.size[1]}".encode())
+    h.update(small.tobytes())
+    return h.hexdigest()
+
+
+# ── GUI ────────────────────────────────────────────────────────────────────────
+PREVIEW_W       = 360
+PREVIEW_H       = 200
+WIDTH_BASE      = 400
+WIDTH_WITH_FORM = 800
+HEIGHT_BASE     = 620
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Captura de Pólizas → 3420")
+        set_window_icon(self)
+        self.resizable(False, False)
+        self.configure(bg="#F7F9FC")
+        self._last_hash    = None
+        self._pending      = None
+        self._tk_img       = None
+        self._processing   = False
+        self._count        = 0
+        self._json_data    = None
+        self._cliente_data = None
+        self._form_visible = False
+        self._build()
+        self._poll()
+        self.geometry(f"{WIDTH_BASE}x{HEIGHT_BASE}")
+
+    def _build(self):
+        # Header
+        hdr = tk.Frame(self, bg="#1B3F6E", height=56)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="Captura de Pólizas → 3420",
+                 font=("Segoe UI", 13, "bold"), fg="white", bg="#1B3F6E"
+                 ).pack(side="left", padx=18, pady=14)
+        self.lbl_count = tk.Label(hdr, text="0 enviadas",
+                                  font=("Segoe UI", 9), fg="#8BADD4", bg="#1B3F6E")
+        self.lbl_count.pack(side="right", padx=14)
+
+        # Dos columnas
+        self._content = tk.Frame(self, bg="#F7F9FC")
+        self._content.pack(fill="both", expand=True)
+        self._left_col = tk.Frame(self._content, bg="#F7F9FC", width=400)
+        self._left_col.pack(side="left", fill="both", expand=False)
+        self._left_col.pack_propagate(False)
+        self._right_col = tk.Frame(self._content, bg="#F7F9FC", width=380)
+        self._right_col.pack_propagate(False)
+
+        # Instrucción
+        self.lbl_instruccion = tk.Label(
+            self._left_col,
+            text="📋  Copia una imagen desde el correo\ny aparecerá aquí automáticamente.",
+            font=("Segoe UI", 10), fg="#6B7A8D", bg="#F7F9FC",
+            justify="center", wraplength=340)
+        self.lbl_instruccion.pack(pady=(16, 8))
+
+        # Preview
+        self._preview_frame = tk.Frame(
+            self._left_col, bg="#E8EEF6",
+            highlightthickness=1, highlightbackground="#C9D8EC",
+            width=PREVIEW_W, height=PREVIEW_H)
+        self._preview_frame.pack(padx=20)
+        self._preview_frame.pack_propagate(False)
+        self.lbl_preview = tk.Label(self._preview_frame, bg="#E8EEF6",
+                                    text="Sin imagen", font=("Segoe UI", 9), fg="#A0AFBF")
+        self.lbl_preview.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Estado
+        self.lbl_estado = tk.Label(self._left_col, text="",
+                                   font=("Segoe UI", 10, "bold"), fg="#1B3F6E", bg="#F7F9FC")
+        self.lbl_estado.pack(pady=(12, 2))
+        self.lbl_sub = tk.Label(self._left_col, text="",
+                                font=("Segoe UI", 9), fg="#6B7A8D",
+                                bg="#F7F9FC", wraplength=340, justify="center")
+        self.lbl_sub.pack()
+
+        # Botón procesar
+        self.btn = tk.Button(
+            self._left_col, text="⚙  Procesar imagen",
+            font=("Segoe UI", 12, "bold"), bg="#1B3F6E", fg="white",
+            activebackground="#142E52", activeforeground="white",
+            relief="flat", padx=16, pady=12, cursor="hand2",
+            state="disabled", disabledforeground="#8BADD4",
+            command=self._on_btn_click)
+        self.btn.pack(fill="x", padx=20, pady=(14, 4))
+
+        # Botón enviar a SharePoint
+        self.btn_enviar = tk.Button(
+            self._left_col, text="📤  Enviar a SharePoint",
+            font=("Segoe UI", 11, "bold"), bg="#0F6E56", fg="white",
+            activebackground="#0A5240", activeforeground="white",
+            relief="flat", padx=16, pady=10, cursor="hand2",
+            state="disabled", disabledforeground="#7EC8A0",
+            command=self._on_enviar)
+        self.btn_enviar.pack(fill="x", padx=20, pady=(0, 6))
+
+        # Log
+        tk.Label(self._left_col, text="Registro",
+                 font=("Segoe UI", 8, "bold"), fg="#7A8FA6", bg="#F7F9FC"
+                 ).pack(anchor="w", padx=20, pady=(6, 2))
+        frm = tk.Frame(self._left_col, bg="white",
+                       highlightthickness=1, highlightbackground="#DDE8F4")
+        frm.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+        self.log_box = tk.Text(frm, font=("Consolas", 8), fg="#555E6B", bg="white",
+                               relief="flat", bd=0, padx=6, pady=6,
+                               state="disabled", wrap="word")
+        sb = tk.Scrollbar(frm, command=self.log_box.yview)
+        self.log_box.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.log_box.pack(fill="both", expand=True)
+
+        self._build_form()
+
+    def _build_form(self):
+        ff = tk.Frame(self._right_col, bg="#EEF3FA",
+                      highlightthickness=1, highlightbackground="#C9D8EC")
+        ff.pack(fill="both", expand=True, padx=(0, 16), pady=(16, 14))
+        self._form_frame = ff
+
+        tk.Label(ff, text="📝  Datos del cliente y operación",
+                 font=("Segoe UI", 11, "bold"), fg="#1B3F6E", bg="#EEF3FA"
+                 ).pack(anchor="w", padx=18, pady=(16, 10))
+
+        grid = tk.Frame(ff, bg="#EEF3FA")
+        grid.pack(fill="x", padx=18, pady=(0, 4))
+        grid.columnconfigure(1, weight=1)
+
+        self._form_vars = {}
+        vcmd_digits = (self.register(lambda s: s.isdigit() or s == ""), "%P")
+
+        def add_field(row, label, key, digits=False, default=""):
+            tk.Label(grid, text=label, font=("Segoe UI", 9), fg="#4A5568",
+                     bg="#EEF3FA", anchor="w"
+                     ).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 10))
+            var = tk.StringVar(value=default)
+            kwargs = {"validate": "key", "validatecommand": vcmd_digits} if digits else {}
+            e = tk.Entry(grid, textvariable=var, font=("Segoe UI", 10),
+                         relief="flat", bd=0, bg="white",
+                         highlightthickness=1, highlightbackground="#C9D8EC",
+                         highlightcolor="#1B3F6E", **kwargs)
+            e.grid(row=row, column=1, sticky="ew", pady=3, ipady=5)
+            self._form_vars[key] = var
+
+        default_asistente = os.environ.get("USERNAME", "").upper()
+
+        tk.Label(grid, text="— BASE SP 3420 —", font=("Segoe UI", 8),
+                 fg="#A0AFBF", bg="#EEF3FA"
+                 ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
+
+        # Asesor: Combobox poblado desde LISTA OFICIAL en SharePoint
+        tk.Label(grid, text="Asesor", font=("Segoe UI", 9), fg="#4A5568",
+                 bg="#EEF3FA", anchor="w"
+                 ).grid(row=1, column=0, sticky="w", pady=3, padx=(0, 10))
+        asesor_var = tk.StringVar()
+        self._asesor_combo = ttk.Combobox(
+            grid, textvariable=asesor_var,
+            font=("Segoe UI", 10), state="normal",
+            values=[], height=12,
+        )
+        self._asesor_combo.grid(row=1, column=1, sticky="ew", pady=3, ipady=3)
+        self._form_vars["asesor"] = asesor_var
+
+        add_field(2, "Cliente",      "nombre_cliente")
+        add_field(3, "Asistente",    "asistente",  default=default_asistente)
+        add_field(4, "Código SAB",   "codigo_sab", digits=True)
+        add_field(5, "Código SAF",   "codigo_saf", digits=True)
+        add_field(6, "Plazo",        "plazo")
+        add_field(7, "Tasa",         "tasa")
+
+        # Botón confirmar formulario
+        self._btn_confirmar = tk.Button(
+            ff, text="✅  Confirmar datos",
+            font=("Segoe UI", 11, "bold"), bg="#1B3F6E", fg="white",
+            activebackground="#142E52", activeforeground="white",
+            relief="flat", padx=16, pady=14, cursor="hand2",
+            command=self._on_confirmar)
+        self._btn_confirmar.pack(fill="x", padx=18, pady=(6, 18))
+
+    # ── Formulario ─────────────────────────────────────────────────────────────
+    def _show_form(self):
+        if not self._form_visible:
+            self._right_col.pack(side="right", fill="both", expand=True)
+            self._form_visible = True
+            self.geometry(f"{WIDTH_WITH_FORM}x{HEIGHT_BASE}")
+
+    def _hide_form(self):
+        if self._form_visible:
+            self._right_col.pack_forget()
+            self._form_visible = False
+            self.geometry(f"{WIDTH_BASE}x{HEIGHT_BASE}")
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+    def _log(self, msg, level="info"):
+        icons = {"info": "·", "ok": "✔", "warn": "⚠", "err": "✖"}
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {icons.get(level,'·')} {msg}\n"
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", line)
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def _show_preview(self, img):
+        thumb = img.copy()
+        thumb.thumbnail((PREVIEW_W, PREVIEW_H), _resample_filter())
+        self._tk_img = ImageTk.PhotoImage(thumb)
+        self.lbl_preview.configure(image=self._tk_img, text="")
+
+    def _rebuild_preview_label(self):
+        for w in self._preview_frame.winfo_children():
+            w.destroy()
+        self._tk_img = None
+        self._preview_frame.configure(bg="#E8EEF6", highlightbackground="#C9D8EC")
+        self.lbl_preview = tk.Label(self._preview_frame, bg="#E8EEF6",
+                                    text="Sin imagen", font=("Segoe UI", 9), fg="#A0AFBF")
+        self.lbl_preview.place(relx=0.5, rely=0.5, anchor="center")
+
+    # ── Estados UI ────────────────────────────────────────────────────────────
+    def _set_idle(self):
+        self._hide_form()
+        self._json_data    = None
+        self._pending      = None
+        self._cliente_data = None
+        self.lbl_instruccion.configure(
+            text="📋  Copia una imagen desde el correo\ny aparecerá aquí automáticamente.")
+        self.lbl_estado.configure(text="", fg="#1B3F6E")
+        self.lbl_sub.configure(text="", fg="#6B7A8D")
+        self.btn.configure(state="disabled", text="⚙  Procesar imagen")
+        self.btn_enviar.configure(state="disabled", text="📤  Enviar a SharePoint")
+        self._rebuild_preview_label()
+
+    def _set_detected(self, img):
+        self.lbl_instruccion.configure(text="¿Es esta la imagen que quieres procesar?")
+        self.lbl_estado.configure(text="✅  Imagen lista", fg="#0F6E56")
+        self.lbl_sub.configure(text=f"{img.size[0]}×{img.size[1]} px", fg="#6B7A8D")
+        self.btn.configure(state="normal", text="⚙  Procesar imagen")
+        self.btn_enviar.configure(state="disabled")
+        self._show_preview(img)
+
+    def _set_processing(self):
+        self.lbl_instruccion.configure(text="Procesando la imagen…")
+        self.lbl_estado.configure(text="⏳  Leyendo datos...", fg="#185FA5")
+        self.lbl_sub.configure(text="Esto tarda unos segundos.")
+        self.btn.configure(state="disabled")
+
+    def _set_awaiting_form(self, tipo: str):
+        label = "venta" if tipo == "VENTA" else "compra"
+        self.lbl_instruccion.configure(
+            text=f"Póliza de {label} detectada.\nCompleta los datos y confirma.")
+        self.lbl_estado.configure(text="📝  Completa el formulario", fg="#185FA5")
+        self.lbl_sub.configure(text="Puedes dejar campos vacíos si no aplican.")
+        self.btn.configure(state="disabled")
+        self._show_form()
+
+    def _set_ready_to_send(self, detalle: str):
+        self._hide_form()
+        self.lbl_instruccion.configure(
+            text="Datos confirmados.\nPresiona el botón para registrar en SharePoint.")
+        self.lbl_estado.configure(text="✅  Datos listos", fg="#0F6E56")
+        self.lbl_sub.configure(text=detalle, fg="#2E7D5A")
+        self.btn_enviar.configure(state="normal", text="📤  Enviar a SharePoint")
+
+    def _set_sending(self):
+        self.lbl_estado.configure(text="⏳  Enviando a SharePoint...", fg="#185FA5")
+        self.lbl_sub.configure(text="Registrando en FICOS. Espera un momento.")
+        self.btn_enviar.configure(state="disabled", text="⏳  Enviando...")
+
+    def _on_success_send(self, fila: int):
+        self._count += 1
+        self.lbl_count.configure(text=f"{self._count} enviadas")
+        for w in self._preview_frame.winfo_children():
+            w.destroy()
+        self._preview_frame.configure(bg="#EBF7F0", highlightbackground="#7EC8A0")
+        tk.Label(self._preview_frame, text="✅",
+                 font=("Segoe UI", 44), bg="#EBF7F0"
+                 ).place(relx=0.5, rely=0.25, anchor="center")
+        tk.Label(self._preview_frame, text="¡Registrado en SharePoint!",
+                 font=("Segoe UI", 13, "bold"), fg="#0A5C3A", bg="#EBF7F0"
+                 ).place(relx=0.5, rely=0.55, anchor="center")
+        tk.Label(self._preview_frame,
+                 text=f"Fila {fila} en la hoja FICOS",
+                 font=("Segoe UI", 9), fg="#2E7D5A", bg="#EBF7F0",
+                 wraplength=320, justify="center"
+                 ).place(relx=0.5, rely=0.76, anchor="center")
+        self.btn_enviar.configure(state="disabled")
+        self.after(4000, self._set_idle)
+
+    def _on_send_error(self, error: str):
+        short = error[:100] if len(error) > 100 else error
+        self.lbl_estado.configure(text="⚠  Error al enviar a SharePoint", fg="#993C1D")
+        self.lbl_sub.configure(text=short, fg="#993C1D")
+        self.btn_enviar.configure(state="normal", text="📤  Reintentar")
+
+    def _on_error(self, msg: str):
+        self.lbl_estado.configure(text="⚠  Ocurrió un error", fg="#993C1D")
+        self.lbl_sub.configure(text=msg)
+        self.btn.configure(state="disabled")
+        self.after(3500, self._set_idle)
+
+    # ── Polling ────────────────────────────────────────────────────────────────
+    def _poll(self):
+        if not self._processing and not self._form_visible:
+            try:
+                img = _get_clipboard_image()
+                if img is not None:
+                    fp = _image_fingerprint(img)
+                    if fp != self._last_hash:
+                        self._last_hash = fp
+                        self._pending   = img.copy()
+                        self._set_detected(self._pending)
+                        self._log(f"Imagen detectada: {img.size[0]}×{img.size[1]}px")
+            except Exception:
+                pass
+        self.after(1500, self._poll)
+
+    # ── Flujo ─────────────────────────────────────────────────────────────────
+    def _on_btn_click(self):
+        if not self._pending:
+            return
+        self._processing = True
+        self._set_processing()
+        self._log("Enviando a Claude...")
+        threading.Thread(target=self._run_claude,
+                         args=(self._pending.copy(),), daemon=True).start()
+
+    def _run_claude(self, img):
+        try:
+            data = call_claude(img)
+            self.after(0, lambda d=data: self._on_claude_success(d))
+        except json.JSONDecodeError:
+            self.after(0, lambda: self._on_claude_error(
+                "Respuesta inválida", "No se pudieron leer los datos.\nIntenta de nuevo."))
+        except anthropic.APIConnectionError:
+            self.after(0, lambda: self._on_claude_error(
+                "Error de conexión", "Sin conexión a internet.\nVerifica tu red e intenta de nuevo."))
+        except anthropic.AuthenticationError:
+            self.after(0, lambda: self._on_claude_error(
+                "API Key inválida", "Código de activación inválido.\nBorra .pwd y reinicia."))
+        except Exception as e:
+            self.after(0, lambda msg=f"Error: {type(e).__name__}: {e}":
+                       self._on_claude_error(msg, "Error inesperado.\nRevisa el registro."))
+        finally:
+            self.after(0, lambda: setattr(self, "_processing", False))
+
+    def _on_claude_success(self, data: dict):
+        self._json_data = data
+        tipo   = data.get("tipo", "COMPRA")
+        monto  = data.get("monto_venta") if tipo == "VENTA" else data.get("monto_compra")
+        ticker = data.get("ticker", "")
+        partes = [f"[{tipo}]", ticker]
+        if isinstance(monto, (int, float)): partes.append(f"Neto: {monto:,.2f}")
+        self._log(f"JSON OK → {'  |  '.join(p for p in partes if p)}", "ok")
+
+        # Pre-llenar campos del formulario extraídos de la imagen
+        numero_orden = data.get("numero_orden")
+        if numero_orden is not None:
+            self._form_vars["codigo_sab"].set(str(int(numero_orden)))
+
+        nombre_cliente = data.get("nombre_cliente")
+        if nombre_cliente:
+            self._form_vars["nombre_cliente"].set(nombre_cliente.strip().upper())
+
+        plazo = data.get("plazo")
+        if plazo:
+            self._form_vars["plazo"].set(str(plazo).strip().upper())
+
+        tasa = data.get("tasa")
+        if tasa is not None:
+            self._form_vars["tasa"].set(fmt_tasa(tasa))
+
+        self._set_awaiting_form(tipo)
+
+    def _on_claude_error(self, log_msg: str, ui_msg: str):
+        self._log(log_msg, "err")
+        self._on_error(ui_msg)
+
+    def _on_confirmar(self):
+        if not self._json_data:
+            self._on_error("No hay datos extraídos.")
+            return
+
+        cliente = {
+            "asesor":         self._form_vars["asesor"].get().strip(),
+            "codigo_sab":     self._form_vars["codigo_sab"].get().strip(),
+            "codigo_saf":     self._form_vars["codigo_saf"].get().strip(),
+            "nombre_cliente": self._form_vars["nombre_cliente"].get().strip(),
+            "asistente":      self._form_vars["asistente"].get().strip(),
+            "plazo":          self._form_vars["plazo"].get().strip(),
+            "tasa":           self._form_vars["tasa"].get().strip(),
+        }
+
+        tipo   = self._json_data.get("tipo", "COMPRA")
+        monto  = self._json_data.get("monto_venta") if tipo == "VENTA" else self._json_data.get("monto_compra")
+        ticker = self._json_data.get("ticker", "")
+        partes = [f"[{tipo}]", ticker]
+        if isinstance(monto, (int, float)):
+            partes.append(f"Neto: {monto:,.2f}")
+        detalle = "  |  ".join(p for p in partes if p)
+
+        self._log(f"Datos confirmados → {detalle}", "ok")
+        self._cliente_data = cliente
+
+        # Limpiar formulario conservando asistente
+        for k in self._form_vars:
+            if k != "asistente":
+                self._form_vars[k].set("")
+
+        self._set_ready_to_send(detalle)
+
+    def _on_enviar(self):
+        if not self._json_data or not self._cliente_data:
+            return
+        self._set_sending()
+        threading.Thread(
+            target=self._run_enviar,
+            args=(self._json_data, self._cliente_data),
+            daemon=True,
+        ).start()
+
+    def _run_enviar(self, json_data: dict, cliente: dict):
+        result = graph_client.write_row_to_sp(json_data, cliente)
+        self.after(0, lambda r=result: self._on_enviar_done(r))
+
+    def _on_enviar_done(self, result: dict):
+        if result.get("ok"):
+            fila = result["fila"]
+            self._log(f"Escrito en FICOS fila {fila}", "ok")
+            audit.log("sp_write", success=True,
+                      metadata={"fila": fila,
+                                "tipo": self._json_data.get("tipo", "?") if self._json_data else "?"})
+            self._on_success_send(fila)
+        else:
+            error = result.get("error", "Error desconocido")
+            self._log(f"Error al escribir en SharePoint: {error}", "err")
+            audit.log("sp_write", success=False, metadata={"error": str(error)[:100]})
+            self._on_send_error(str(error))
+
+    def start_update_check(self):
+        update_manager.check_for_updates_with_status(
+            parent=self,
+            current_version=APP_VERSION,
+            force=True,
+        )
+
+    # ── Carga de asesores desde SharePoint ────────────────────────────────────
+    def load_asesores(self):
+        threading.Thread(target=self._fetch_asesores, daemon=True).start()
+
+    def _fetch_asesores(self):
+        try:
+            resultado = graph_client.get_lista_oficial()
+            asesores  = resultado.get("asesores", [])
+            if asesores:
+                self.after(0, lambda a=asesores: self._set_asesores(a))
+        except Exception:
+            pass
+
+    def _set_asesores(self, asesores: list):
+        try:
+            self._asesor_combo["values"] = asesores
+            self._log(f"Lista de asesores cargada ({len(asesores)} registros)", "ok")
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    app = App()
+    app.after(100, app.start_update_check)
+    app.after(200, app.load_asesores)
+    app.mainloop()
