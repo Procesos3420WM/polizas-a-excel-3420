@@ -358,7 +358,7 @@ HEIGHT_BASE     = 620
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Captura de Pólizas → 3420")
+        self.title(f"Captura de Pólizas → 3420  v{APP_VERSION}")
         set_window_icon(self)
         self.resizable(False, False)
         self.configure(bg="#F7F9FC")
