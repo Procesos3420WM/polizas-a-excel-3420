@@ -117,6 +117,11 @@ echo [6/7] Compilando Polizas a Excel 3420.exe...
 if exist "dist\Polizas a Excel 3420.exe" (
     echo OK: dist\Polizas a Excel 3420.exe generado.
     >> "%LOG%" echo OK: dist\Polizas a Excel 3420.exe generado.
+
+    echo Actualizando SHA256 en version.json...
+    >> "%LOG%" echo Actualizando SHA256 en version.json...
+    powershell -Command "& { $hash = (Get-FileHash 'dist\Polizas a Excel 3420.exe' -Algorithm SHA256).Hash; $j = Get-Content 'version.json' -Raw | ConvertFrom-Json; $j.sha256 = $hash; ($j | ConvertTo-Json -Depth 5) | Set-Content 'version.json' -Encoding UTF8; Write-Host 'SHA256:' $hash }" >> "%LOG%" 2>&1
+    powershell -Command "& { $hash = (Get-FileHash 'dist\Polizas a Excel 3420.exe' -Algorithm SHA256).Hash; Write-Host 'SHA256:' $hash }"
 ) else (
     echo FALLO: dist\Polizas a Excel 3420.exe NO generado.
     >> "%LOG%" echo FALLO: dist\Polizas a Excel 3420.exe NO generado.
