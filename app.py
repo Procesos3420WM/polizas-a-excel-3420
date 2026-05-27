@@ -69,113 +69,21 @@ def set_window_icon(win):
     except Exception:
         pass
 
-# ── API Key encriptada ─────────────────────────────────────────────────────────
+# ── API Key ────────────────────────────────────────────────────────────────────
+# El acceso a la app está controlado por Microsoft 365 (ver flujo de auth al inicio).
+# La API key de Claude se desencripta en tiempo de compilación con la constante interna.
 ENCRYPTED_API_KEY = "HczQewI6Tutf4fdlszW4DvXiLv0z3YQn/P9oayxkkiAB085XAD8I82vjpQ7uSZ1d98c43lTemzbhiX1YBT3ydT7WySgrIQDpYdm3LK0ljnem61nuaq/xDMy7W3swE5VcC/2aNz8+OsdD/4YX"
-PWD_FILE = APP_DIR / ".pwd"
+_APP_ACTIVATION = "G.Coril2026$"
 
 
 def _xor(data: bytes, key: bytes) -> bytes:
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
 
 
-def decrypt_api_key(password: str) -> str:
-    key = hashlib.sha256(password.encode()).digest()
-    return _xor(base64.b64decode(ENCRYPTED_API_KEY), key).decode()
-
-
-def _machine_secret() -> bytes:
-    seed = (os.environ.get("USERNAME", "")
-            + os.environ.get("COMPUTERNAME", "")
-            + str(Path.home()))
-    return hashlib.sha256(seed.encode()).digest()
-
-
-def save_password(pwd: str):
-    PWD_FILE.write_bytes(base64.b64encode(_xor(pwd.encode(), _machine_secret())))
-
-
-def load_password() -> str:
-    return _xor(base64.b64decode(PWD_FILE.read_bytes()), _machine_secret()).decode()
-
-
-# ── Ventana de activación ──────────────────────────────────────────────────────
-def ask_password_gui() -> tuple:
-    root = tk.Tk()
-    root.withdraw()
-    set_window_icon(root)
-    win = tk.Toplevel(root)
-    win.title("Activación")
-    set_window_icon(win)
-    win.geometry("420x320")
-    win.resizable(False, False)
-    win.configure(bg="#F7F9FC")
-    win.update_idletasks()
-    win.geometry(f"+{(win.winfo_screenwidth()-420)//2}+{(win.winfo_screenheight()-320)//2}")
-    win.protocol("WM_DELETE_WINDOW", root.destroy)
-    result = {"pwd": "", "api_key": ""}
-
-    tk.Label(win, text="🔑", font=("Segoe UI", 36), bg="#F7F9FC").pack(pady=(20, 0))
-    tk.Label(win, text="Ingresa tu código de activación",
-             font=("Segoe UI", 13, "bold"), fg="#1B3F6E", bg="#F7F9FC").pack()
-    tk.Label(win, text="Solicítalo a tu supervisor.\nSolo se pedirá una vez.",
-             font=("Segoe UI", 10), fg="#6B7A8D", bg="#F7F9FC", justify="center").pack(pady=(4, 14))
-
-    ef = tk.Frame(win, bg="#F7F9FC")
-    ef.pack(padx=32, fill="x")
-    entry = tk.Entry(ef, show="•", font=("Segoe UI", 12), relief="flat", bd=0,
-                     bg="white", highlightthickness=1, highlightbackground="#C9D8EC",
-                     highlightcolor="#1B3F6E", justify="center")
-    entry.pack(fill="x", ipady=9, padx=2)
-    entry.focus()
-    err_lbl = tk.Label(win, text="", fg="#993C1D", bg="#F7F9FC", font=("Segoe UI", 9))
-    err_lbl.pack(pady=(4, 0))
-
-    def confirm(event=None):
-        pwd = entry.get().strip()
-        if not pwd:
-            err_lbl.configure(text="⚠  Ingresa el código de activación")
-            return
-        try:
-            api_key = decrypt_api_key(pwd)
-            if not api_key.startswith("sk-ant-"):
-                raise ValueError()
-            result["pwd"] = pwd
-            result["api_key"] = api_key
-            root.destroy()
-        except Exception:
-            err_lbl.configure(text="⚠  Código incorrecto, intenta de nuevo")
-            entry.configure(highlightbackground="#E24B4A")
-            entry.delete(0, "end")
-
-    entry.bind("<Return>", confirm)
-    tk.Button(win, text="Activar →", font=("Segoe UI", 11, "bold"),
-              bg="#1B3F6E", fg="white", activebackground="#142E52",
-              activeforeground="white", relief="flat", padx=20, pady=9,
-              cursor="hand2", bd=0, command=confirm).pack(pady=(10, 0))
-    root.mainloop()
-    return result["pwd"], result["api_key"]
-
-
-def get_api_key() -> str:
-    if PWD_FILE.exists():
-        try:
-            pwd = load_password()
-            api_key = decrypt_api_key(pwd)
-            if api_key.startswith("sk-ant-"):
-                return api_key
-        except Exception:
-            try:
-                PWD_FILE.unlink()
-            except Exception:
-                pass
-    pwd, api_key = ask_password_gui()
-    if not api_key:
-        raise SystemExit("Código de activación requerido.")
-    save_password(pwd)
-    return api_key
-
-
-API_KEY = get_api_key()
+API_KEY = _xor(
+    base64.b64decode(ENCRYPTED_API_KEY),
+    hashlib.sha256(_APP_ACTIVATION.encode()).digest(),
+).decode()
 
 audit.init(endpoint_url=AUDIT_ENDPOINT, api_key=AUDIT_API_KEY, app_version=APP_VERSION)
 audit.log("app_start", success=True)
@@ -373,16 +281,18 @@ class App(tk.Tk):
         set_window_icon(self)
         self.resizable(False, False)
         self.configure(bg="#F7F9FC")
-        self._last_hash    = None
-        self._pending      = None
-        self._tk_img       = None
+        self._last_hash     = None
+        self._pending       = None
+        self._tk_img        = None
         self._processing    = False
         self._ready_to_send = False
+        self._auth_ok       = False
         self._count         = 0
         self._json_data     = None
         self._cliente_data  = None
         self._form_visible  = False
         self._build()
+        self._set_authenticating()
         self._poll()
         self.geometry(f"{WIDTH_BASE}x{HEIGHT_BASE}")
 
@@ -810,6 +720,9 @@ class App(tk.Tk):
 
     # ── Polling ────────────────────────────────────────────────────────────────
     def _poll(self):
+        if not self._auth_ok:
+            self.after(1500, self._poll)
+            return
         if not self._processing and not self._form_visible and not self._ready_to_send:
             try:
                 img = _get_clipboard_image()
@@ -958,6 +871,82 @@ class App(tk.Tk):
             audit.log("sp_write", success=False, metadata={"error": str(error)[:100]})
             self._on_send_error(str(error))
 
+    # ── Autenticación Microsoft 365 ───────────────────────────────────────────
+    def _set_authenticating(self):
+        self.lbl_instruccion.configure(
+            text="Iniciando sesión con Microsoft 365…\nSe abrirá el navegador si es necesario.")
+        self.lbl_estado.configure(text="🔐  Verificando acceso...", fg="#185FA5")
+        self.lbl_sub.configure(text="Comprobando que tu cuenta tiene acceso a SharePoint.")
+        self.btn.configure(state="disabled")
+        self.btn_enviar.configure(state="disabled")
+
+    _AUTH_WEEK_MS = 7 * 24 * 3600 * 1000   # revalidar una vez por semana
+
+    def start_sp_auth(self):
+        threading.Thread(target=lambda: self._run_sp_auth(initial=True),
+                         daemon=True).start()
+
+    def _run_sp_auth(self, initial: bool):
+        try:
+            graph_client.verify_access()
+            self.after(0, lambda: self._on_auth_success(initial))
+        except Exception as e:
+            self.after(0, lambda err=str(e): self._on_auth_fail(err, initial))
+
+    def _on_auth_success(self, initial: bool):
+        self._auth_ok = True
+        if initial:
+            self._log("Acceso a SharePoint verificado", "ok")
+            self._set_idle()
+            self.after(100, self.start_update_check)
+            self.after(200, self.load_asesores)
+        else:
+            # Re-auth en segundo plano: solo loguear, NO tocar el estado actual
+            self._log("Sesión Microsoft renovada silenciosamente", "ok")
+        # Programar siguiente verificación semanal
+        self.after(self._AUTH_WEEK_MS, self._periodic_auth_check)
+
+    def _on_auth_fail(self, error: str, initial: bool):
+        self._auth_ok = False
+        short = error[:120] if len(error) > 120 else error
+        self._log(f"Auth fallida: {short}", "err")
+        if initial:
+            # Primera autenticación: bloquear toda la app
+            self.lbl_instruccion.configure(
+                text="Sin acceso a SharePoint.\nContacta a tu supervisor.")
+            self.lbl_estado.configure(text="⚠  Acceso denegado", fg="#993C1D")
+            self.lbl_sub.configure(text=short, fg="#993C1D")
+            self.btn.configure(
+                state="normal", text="🔄  Reintentar login",
+                command=lambda: (self._set_authenticating(),
+                                 self.after(200, self.start_sp_auth)))
+        else:
+            # Re-auth fallida en segundo plano: avisar sin interrumpir el proceso
+            # El usuario puede seguir; si intenta enviar a SP, get_token() lo re-autenticará
+            self._log("No se pudo renovar la sesión — se pedirá login al enviar a SP", "warn")
+            self.after(self._AUTH_WEEK_MS, self._periodic_auth_check)
+
+    def _periodic_auth_check(self):
+        threading.Thread(target=self._run_periodic_auth, daemon=True).start()
+
+    def _run_periodic_auth(self):
+        """
+        Intento silencioso semanal.
+        Si el refresh token sigue vivo → renovamos y reprogramamos.
+        Si expiró → lanzamos re-auth interactiva en segundo plano sin tocar el proceso.
+        """
+        try:
+            graph_client.get_token()          # silent refresh — no abre navegador
+            self.after(0, lambda: self._on_auth_success(initial=False))
+        except Exception:
+            # Refresh token expirado: lanzar re-auth interactiva en background
+            # (abre navegador si es necesario; el hilo actual espera al login)
+            self.after(0, lambda: self._log(
+                "Token semanal expirado — re-login en segundo plano", "warn"))
+            threading.Thread(
+                target=lambda: self._run_sp_auth(initial=False),
+                daemon=True).start()
+
     def start_update_check(self):
         update_manager.check_for_updates_with_status(
             parent=self,
@@ -989,6 +978,5 @@ class App(tk.Tk):
 
 if __name__ == "__main__":
     app = App()
-    app.after(100, app.start_update_check)
-    app.after(200, app.load_asesores)
+    app.after(150, app.start_sp_auth)   # login Microsoft → si ok: update_check + load_asesores
     app.mainloop()

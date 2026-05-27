@@ -321,6 +321,17 @@ def write_row_to_sp(json_data: dict, cliente: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+# ── Verificación de acceso ────────────────────────────────────────────────────
+def verify_access() -> None:
+    """
+    Verifica que la cuenta Microsoft autenticada puede leer el archivo SharePoint.
+    Lanza excepción si el token no es válido o el usuario no tiene acceso.
+    """
+    token    = get_token()
+    share_id = _encode_share_url(SP_FILE_URL)
+    _graph_get(token, f"/shares/{share_id}/driveItem")
+
+
 # ── Caché offline ──────────────────────────────────────────────────────────────
 def _save_cache(data: dict):
     try:
