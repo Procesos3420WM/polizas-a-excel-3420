@@ -10,6 +10,7 @@ Datos cacheados en %LOCALAPPDATA%\\PolizasAExcel3420\\asesores_cache.json
 import base64
 import json
 import os
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -79,18 +80,38 @@ def get_token() -> str:
 
 
 # ── Graph helpers ──────────────────────────────────────────────────────────────
-def _headers(token: str) -> dict:
-    return {
+def _headers(token: str, session_id: str = None) -> dict:
+    h = {
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
     }
+    if session_id:
+        h["workbook-session-id"] = session_id
+    return h
 
 
-def _graph_get(token: str, path: str) -> dict:
+def _graph_get(token: str, path: str, session_id: str = None) -> dict:
     url = f"{GRAPH_BASE}{path}"
-    req = urllib.request.Request(url, headers=_headers(token))
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    req = urllib.request.Request(url, headers=_headers(token, session_id))
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code} GET {path}: {body}") from e
+
+
+def _graph_post(token: str, path: str, body: dict, session_id: str = None) -> dict:
+    url  = f"{GRAPH_BASE}{path}"
+    data = json.dumps(body).encode("utf-8")
+    req  = urllib.request.Request(url, data=data, headers=_headers(token, session_id), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code} POST {path}: {body_err}") from e
 
 
 def _encode_share_url(url: str) -> str:
@@ -165,9 +186,9 @@ def get_lista_oficial() -> dict:
 FICOS_SHEET = "FICOS"
 
 # Formula templates — {row} is replaced with the actual Excel row number
-_F_FUNC = "=SI.ERROR(BUSCARV(A{row};'LISTA OFICIAL'!$A$2:$B$500;2;FALSO);\"\")"
-_F_SEDE = "=SI.ERROR(BUSCARV(A{row};'LISTA OFICIAL'!$A$2:$D$500;3;FALSO);\"\")"
-_F_MON  = '=SI(IZQUIERDA(ESPACIOS(M{row});4)="ICMP";"USD";SI(IZQUIERDA(ESPACIOS(M{row});5)="PRIME";"PEN";SI(IZQUIERDA(ESPACIOS(M{row});2)="IF";"USD";"")))'
+_F_FUNC = '=IFERROR(VLOOKUP(A{row},\'LISTA OFICIAL\'!$A$2:$B$500,2,FALSE),"")'
+_F_SEDE = '=IFERROR(VLOOKUP(A{row},\'LISTA OFICIAL\'!$A$2:$D$500,3,FALSE),"")'
+_F_MON  = '=IF(LEFT(TRIM(M{row}),4)="ICMP","USD",IF(LEFT(TRIM(M{row}),5)="PRIME","PEN",IF(LEFT(TRIM(M{row}),2)="IF","USD","")))'
 
 # Module-level cache for resolved drive/item IDs (avoids re-resolving on every write)
 _CACHED_DRIVE_ID: "str | None" = None
@@ -185,13 +206,17 @@ def _resolve_file_cached(token: str) -> tuple:
     return _CACHED_DRIVE_ID, _CACHED_ITEM_ID
 
 
-def _graph_patch(token: str, path: str, body: dict) -> dict:
+def _graph_patch(token: str, path: str, body: dict, session_id: str = None) -> dict:
     url  = f"{GRAPH_BASE}{path}"
     data = json.dumps(body).encode("utf-8")
-    req  = urllib.request.Request(url, data=data, headers=_headers(token), method="PATCH")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read().decode("utf-8")
-        return json.loads(raw) if raw.strip() else {}
+    req  = urllib.request.Request(url, data=data, headers=_headers(token, session_id), method="PATCH")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        body_err = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code} PATCH {path}: {body_err}") from e
 
 
 def write_row_to_sp(json_data: dict, cliente: dict) -> dict:
@@ -200,17 +225,32 @@ def write_row_to_sp(json_data: dict, cliente: dict) -> dict:
 
     Retorna {"ok": True, "fila": N} o {"ok": False, "error": "mensaje"}.
     """
+    sid = None
     try:
         token = get_token()
         drive_id, item_id = _resolve_file_cached(token)
 
+        # Abrir sesión persistente (igual que tesorería 2)
+        sess = _graph_post(token,
+                           f"/drives/{drive_id}/items/{item_id}/workbook/createSession",
+                           {"persistChanges": True})
+        sid = sess.get("id")
+
         sheet = quote(FICOS_SHEET)
 
-        # Siguiente fila vacía
-        used     = _graph_get(token,
-                              f"/drives/{drive_id}/items/{item_id}"
-                              f"/workbook/worksheets/{sheet}/usedRange(valuesOnly=true)")
-        next_row = used.get("rowCount", 1) + 1
+        # Siguiente fila vacía — lee columna A para encontrar la última celda con datos
+        # (usedRange incluye filas con formato vacías y devuelve un número incorrecto)
+        col_a = _graph_get(token,
+                           f"/drives/{drive_id}/items/{item_id}"
+                           f"/workbook/worksheets/{sheet}/range(address='A1:A3000')",
+                           session_id=sid)
+        col_values = col_a.get("values", [])
+        last_row = 0
+        for i, row in enumerate(col_values):
+            cell = str(row[0]).strip() if row and row[0] not in (None, "", "None") else ""
+            if cell:
+                last_row = i + 1  # 1-indexed
+        next_row = last_row + 1
 
         # Datos de la póliza
         tipo      = json_data.get("tipo", "COMPRA")
@@ -254,11 +294,30 @@ def write_row_to_sp(json_data: dict, cliente: dict) -> dict:
             f"/drives/{drive_id}/items/{item_id}"
             f"/workbook/worksheets/{sheet}/range(address='A{n}:O{n}')",
             {"formulas": [row_values]},
+            session_id=sid,
         )
+
+        # Cerrar sesión
+        try:
+            _graph_post(token,
+                        f"/drives/{drive_id}/items/{item_id}/workbook/closeSession",
+                        {}, session_id=sid)
+        except Exception:
+            pass
 
         return {"ok": True, "fila": n}
 
     except Exception as e:
+        # Intentar cerrar sesión aunque haya fallado
+        if sid:
+            try:
+                token2 = get_token()
+                drive_id2, item_id2 = _resolve_file_cached(token2)
+                _graph_post(token2,
+                            f"/drives/{drive_id2}/items/{item_id2}/workbook/closeSession",
+                            {}, session_id=sid)
+            except Exception:
+                pass
         return {"ok": False, "error": str(e)}
 
 

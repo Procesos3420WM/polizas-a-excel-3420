@@ -169,6 +169,45 @@ if exist "dist\Updater.exe" (
 echo.
 echo Build terminado. Revisa build_log.txt para detalles.
 
+if not exist "dist\Polizas a Excel 3420.exe" goto :end
+
+echo.
+echo ========================================
+echo Git commit y push
+echo ========================================
+>> "%LOG%" echo.
+>> "%LOG%" echo [Git] Commit y push...
+
+for /f "usebackq tokens=*" %%v in (`powershell -Command "(Get-Content version.json -Raw | ConvertFrom-Json).version"`) do set "APP_VER=%%v"
+
+git add app.py graph_client.py audit.py update_manager.py updater.py ^
+        version.json build.bat contexto.md generar_key.py >> "%LOG%" 2>&1
+
+git diff --cached --quiet
+if not errorlevel 1 (
+    echo No hay cambios nuevos para commitear.
+    >> "%LOG%" echo [Git] Nada que commitear.
+    goto :push
+)
+
+git commit -m "build: v%APP_VER%" >> "%LOG%" 2>&1
+if errorlevel 1 (
+    echo [AVISO] git commit falló. Revisa build_log.txt.
+    >> "%LOG%" echo [Git] ERROR en commit.
+    goto :end
+)
+echo [OK] Commit creado: build: v%APP_VER%
+
+:push
+git push >> "%LOG%" 2>&1
+if errorlevel 1 (
+    echo [AVISO] git push falló ^(sin red o sin remote configurado^).
+    >> "%LOG%" echo [Git] ERROR en push.
+) else (
+    echo [OK] Push exitoso a origin.
+    >> "%LOG%" echo [Git] Push OK.
+)
+
 :end
 echo.
 pause

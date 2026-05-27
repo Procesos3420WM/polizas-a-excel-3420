@@ -186,9 +186,20 @@ def fmt_tasa(v) -> str:
     if v is None:
         return ""
     try:
-        return str(float(v)).replace(".", ",") + "%"
+        return f"{float(v):.2f}".replace(".", ",") + "%"
     except Exception:
         return str(v)
+
+
+def parse_tasa(raw: str) -> str:
+    """Normaliza lo que escribió el usuario: '5' '5,0' '5.0' '5%' → '5,00%'."""
+    raw = raw.strip().replace("%", "").replace(",", ".").strip()
+    if not raw:
+        return ""
+    try:
+        return f"{float(raw):.2f}".replace(".", ",") + "%"
+    except ValueError:
+        return ""
 
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
@@ -253,7 +264,7 @@ def img_to_b64(img: Image.Image) -> str:
 
 def call_claude(img: Image.Image) -> dict:
     import time as _t
-    client = anthropic.Anthropic(api_key=API_KEY)
+    client  = anthropic.Anthropic(api_key=API_KEY)
     img_w, img_h = img.size
     t0 = _t.perf_counter()
     in_tok = out_tok = None
@@ -365,11 +376,12 @@ class App(tk.Tk):
         self._last_hash    = None
         self._pending      = None
         self._tk_img       = None
-        self._processing   = False
-        self._count        = 0
-        self._json_data    = None
-        self._cliente_data = None
-        self._form_visible = False
+        self._processing    = False
+        self._ready_to_send = False
+        self._count         = 0
+        self._json_data     = None
+        self._cliente_data  = None
+        self._form_visible  = False
         self._build()
         self._poll()
         self.geometry(f"{WIDTH_BASE}x{HEIGHT_BASE}")
@@ -488,6 +500,7 @@ class App(tk.Tk):
                          highlightcolor="#1B3F6E", **kwargs)
             e.grid(row=row, column=1, sticky="ew", pady=3, ipady=5)
             self._form_vars[key] = var
+            return e
 
         default_asistente = os.environ.get("USERNAME", "").upper()
 
@@ -495,7 +508,7 @@ class App(tk.Tk):
                  fg="#A0AFBF", bg="#EEF3FA"
                  ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 2))
 
-        # Asesor: Combobox poblado desde LISTA OFICIAL en SharePoint
+        # Asesor: Entry + popup Listbox propio (no roba foco como ttk::combobox::Post)
         tk.Label(grid, text="Asesor", font=("Segoe UI", 9), fg="#4A5568",
                  bg="#EEF3FA", anchor="w"
                  ).grid(row=1, column=0, sticky="w", pady=3, padx=(0, 10))
@@ -508,12 +521,160 @@ class App(tk.Tk):
         self._asesor_combo.grid(row=1, column=1, sticky="ew", pady=3, ipady=3)
         self._form_vars["asesor"] = asesor_var
 
+        self._asesor_popup   = None
+        self._asesor_listbox = None
+
+        def _hide_popup(evt=None):
+            if self._asesor_popup and self._asesor_popup.winfo_exists():
+                self._asesor_popup.withdraw()
+
+        def _show_popup(items):
+            if not items:
+                _hide_popup()
+                return
+            # Crear ventana si no existe o fue destruida
+            if self._asesor_popup is None or not self._asesor_popup.winfo_exists():
+                pop = tk.Toplevel(self)
+                pop.wm_overrideredirect(True)
+                pop.wm_attributes("-topmost", True)
+                frm = tk.Frame(pop, relief="solid", bd=1, bg="#C9D8EC")
+                frm.pack(fill="both", expand=True)
+                lb  = tk.Listbox(frm, font=("Segoe UI", 10), selectmode="single",
+                                 relief="flat", bd=0, highlightthickness=0,
+                                 activestyle="none", bg="white", fg="#1B3F6E",
+                                 selectbackground="#1B3F6E", selectforeground="white")
+                sb  = tk.Scrollbar(frm, command=lb.yview)
+                lb.configure(yscrollcommand=sb.set)
+                sb.pack(side="right", fill="y")
+                lb.pack(side="left", fill="both", expand=True)
+                self._asesor_popup   = pop
+                self._asesor_listbox = lb
+
+                def _pick(evt=None):
+                    sel = lb.curselection()
+                    if sel:
+                        self._asesor_combo.set(lb.get(sel[0]))
+                        self._asesor_combo.icursor("end")
+                        self._asesor_combo.selection_clear()
+                    _hide_popup()
+                    self._asesor_combo.focus_set()
+
+                lb.bind("<ButtonRelease-1>", _pick)
+                lb.bind("<Return>",          _pick)
+
+            lb = self._asesor_listbox
+            lb.delete(0, "end")
+            visible = min(len(items), 10)
+            for item in items:
+                lb.insert("end", item)
+            lb.configure(height=visible)
+
+            self._asesor_combo.update_idletasks()
+            x  = self._asesor_combo.winfo_rootx()
+            y  = self._asesor_combo.winfo_rooty() + self._asesor_combo.winfo_height()
+            w  = self._asesor_combo.winfo_width()
+            rh = self._asesor_combo.winfo_height()       # usa la altura del combo como referencia
+            self._asesor_popup.geometry(f"{w}x{visible * rh}+{x}+{y}")
+            self._asesor_popup.deiconify()
+            self._asesor_popup.lift()
+
+        def _asesor_key(event):
+            if event.keysym in ("Escape",):
+                _hide_popup()
+                return
+            if event.keysym in ("Return", "Tab"):
+                _hide_popup()
+                return
+            if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End"):
+                return
+            typed       = self._asesor_combo.get()
+            typed_upper = typed.upper()
+            all_vals    = getattr(self._asesor_combo, "_all_values", [])
+
+            # Filtrar: cualquier nombre o apellido que EMPIECE por lo escrito
+            if typed_upper:
+                filtered = [v for v in all_vals
+                            if any(w.startswith(typed_upper) for w in v.upper().split())]
+            else:
+                filtered = list(all_vals)
+
+            self._asesor_combo["values"] = filtered
+            _show_popup(filtered)
+
+            # Autocomplete inline: solo si el nombre completo empieza por lo escrito
+            if event.keysym not in ("BackSpace", "Delete") and typed_upper:
+                starts = [v for v in all_vals if v.upper().startswith(typed_upper)]
+                if starts:
+                    suggestion = starts[0]
+                    cursor     = len(typed)
+                    self._asesor_combo.set(suggestion)
+                    self._asesor_combo.after(0, lambda c=cursor: (
+                        self._asesor_combo.icursor(c),
+                        self._asesor_combo.selection_range(c, "end"),
+                    ))
+
+        self._asesor_combo.bind("<KeyRelease>", _asesor_key)
+        self._asesor_combo.bind("<FocusOut>",   lambda e: self.after(150, _hide_popup))
+
         add_field(2, "Cliente",      "nombre_cliente")
         add_field(3, "Asistente",    "asistente",  default=default_asistente)
         add_field(4, "Código SAB",   "codigo_sab", digits=True)
         add_field(5, "Código SAF",   "codigo_saf", digits=True)
-        add_field(6, "Plazo",        "plazo")
-        add_field(7, "Tasa",         "tasa")
+        # Plazo: número + unidad (DÍAS / MESES / AÑOS)
+        tk.Label(grid, text="Plazo", font=("Segoe UI", 9), fg="#4A5568",
+                 bg="#EEF3FA", anchor="w"
+                 ).grid(row=6, column=0, sticky="w", pady=3, padx=(0, 10))
+
+        plazo_frame = tk.Frame(grid, bg="#EEF3FA")
+        plazo_frame.grid(row=6, column=1, sticky="ew", pady=3)
+        plazo_frame.columnconfigure(0, weight=1)
+
+        self._plazo_num  = tk.StringVar()
+        self._plazo_unit = tk.StringVar(value="DÍAS")
+        plazo_var = tk.StringVar()
+
+        _SINGULAR = {"DÍAS": "DÍA", "MESES": "MES", "AÑOS": "AÑO"}
+
+        def _update_plazo(*_):
+            n = self._plazo_num.get().strip()
+            u = self._plazo_unit.get().strip()
+            if not n:
+                plazo_var.set("")
+                return
+            try:
+                num = int(n)
+            except ValueError:
+                plazo_var.set("")
+                return
+            unit_display = _SINGULAR.get(u, u) if num == 1 else u
+            plazo_var.set(f"{num} {unit_display}")
+
+        self._plazo_num.trace_add("write",  _update_plazo)
+        self._plazo_unit.trace_add("write", _update_plazo)
+
+        tk.Entry(plazo_frame, textvariable=self._plazo_num,
+                 font=("Segoe UI", 10), relief="flat", bd=0,
+                 bg="white", highlightthickness=1, highlightbackground="#C9D8EC",
+                 highlightcolor="#1B3F6E", width=6,
+                 validate="key", validatecommand=vcmd_digits,
+                 ).grid(row=0, column=0, sticky="ew", ipady=5, padx=(0, 4))
+
+        ttk.Combobox(plazo_frame, textvariable=self._plazo_unit,
+                     values=["DÍAS", "MESES", "AÑOS"],
+                     font=("Segoe UI", 10), state="readonly", width=7,
+                     ).grid(row=0, column=1, ipady=3)
+
+        self._form_vars["plazo"] = plazo_var
+
+        _tasa_entry = add_field(7, "Tasa", "tasa")
+
+        def _normalizar_tasa(evt=None):
+            val = parse_tasa(self._form_vars["tasa"].get())
+            if val:
+                self._form_vars["tasa"].set(val)
+
+        _tasa_entry.bind("<FocusOut>", _normalizar_tasa)
+        _tasa_entry.bind("<Return>",   _normalizar_tasa)
 
         # Botón confirmar formulario
         self._btn_confirmar = tk.Button(
@@ -563,6 +724,7 @@ class App(tk.Tk):
 
     # ── Estados UI ────────────────────────────────────────────────────────────
     def _set_idle(self):
+        self._ready_to_send = False
         self._hide_form()
         self._json_data    = None
         self._pending      = None
@@ -597,8 +759,11 @@ class App(tk.Tk):
         self.lbl_sub.configure(text="Puedes dejar campos vacíos si no aplican.")
         self.btn.configure(state="disabled")
         self._show_form()
+        if not self._asesor_combo["values"]:
+            threading.Thread(target=self._fetch_asesores, daemon=True).start()
 
     def _set_ready_to_send(self, detalle: str):
+        self._ready_to_send = True
         self._hide_form()
         self.lbl_instruccion.configure(
             text="Datos confirmados.\nPresiona el botón para registrar en SharePoint.")
@@ -645,7 +810,7 @@ class App(tk.Tk):
 
     # ── Polling ────────────────────────────────────────────────────────────────
     def _poll(self):
-        if not self._processing and not self._form_visible:
+        if not self._processing and not self._form_visible and not self._ready_to_send:
             try:
                 img = _get_clipboard_image()
                 if img is not None:
@@ -683,7 +848,9 @@ class App(tk.Tk):
             self.after(0, lambda: self._on_claude_error(
                 "API Key inválida", "Código de activación inválido.\nBorra .pwd y reinicia."))
         except Exception as e:
-            self.after(0, lambda msg=f"Error: {type(e).__name__}: {e}":
+            import traceback
+            tb = traceback.format_exc()
+            self.after(0, lambda msg=f"Error: {type(e).__name__}: {e}\n{tb}":
                        self._on_claude_error(msg, "Error inesperado.\nRevisa el registro."))
         finally:
             self.after(0, lambda: setattr(self, "_processing", False))
@@ -708,7 +875,15 @@ class App(tk.Tk):
 
         plazo = data.get("plazo")
         if plazo:
-            self._form_vars["plazo"].set(str(plazo).strip().upper())
+            _TO_PLURAL = {"DÍA": "DÍAS", "DIA": "DÍAS", "MES": "MESES", "AÑO": "AÑOS", "ANO": "AÑOS"}
+            m = re.match(r'^(\d+)\s+(.+)$', str(plazo).strip().upper())
+            if m:
+                unit_raw = m.group(2).strip()
+                unit_plural = _TO_PLURAL.get(unit_raw, unit_raw if unit_raw in ("DÍAS", "MESES", "AÑOS") else "DÍAS")
+                self._plazo_num.set(m.group(1))
+                self._plazo_unit.set(unit_plural)
+            else:
+                self._plazo_num.set(str(plazo).strip())
 
         tasa = data.get("tasa")
         if tasa is not None:
@@ -750,6 +925,8 @@ class App(tk.Tk):
         for k in self._form_vars:
             if k != "asistente":
                 self._form_vars[k].set("")
+        self._plazo_num.set("")
+        self._plazo_unit.set("DÍAS")
 
         self._set_ready_to_send(detalle)
 
@@ -804,6 +981,7 @@ class App(tk.Tk):
     def _set_asesores(self, asesores: list):
         try:
             self._asesor_combo["values"] = asesores
+            self._asesor_combo._all_values = asesores
             self._log(f"Lista de asesores cargada ({len(asesores)} registros)", "ok")
         except Exception:
             pass

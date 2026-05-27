@@ -1,7 +1,7 @@
-{
-  "version": "1.0.0",
-  "download_url": "https://github.com/Procesos3420WM/polizas-a-excel-3420/releases/download/v1.0.0/Polizas.a.Excel.3420.exe",
-  "sha256": "153D8B8773780728BDEFE828CDD90DD3087093A5FE3999CC0B84569BAE61B073",
-  "notes": "Primera versión",
-  "mandatory": false
+﻿{
+    "version":  "1.0.0",
+    "download_url":  "https://github.com/Procesos3420WM/polizas-a-excel-3420/releases/download/v1.0.0/Polizas.a.Excel.3420.exe",
+    "sha256":  "7BE8E51AD0A2A2C9DF6456EB13AB29148277EDF1329CF0D2ED758544761B966F",
+    "notes":  "Primera versiÃ³n",
+    "mandatory":  false
 }
