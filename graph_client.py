@@ -30,10 +30,10 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # ── Archivo SharePoint a consultar ─────────────────────────────────────────────
 SP_FILE_URL = (
     "https://3420wm.sharepoint.com/:x:/r/sites/"
-    "AutomatizacionesparaContabilidad-Procesos3420WM"
-    "/_layouts/15/Doc.aspx"
-    "?sourcedoc=%7B108C4A27-F520-4AED-A22A-B6E1ACE89BA4%7D"
-    "&file=FORMATO%20FONDOS%20PUBLICOS%203420%20-%20Copia.xlsx"
+    "3420WEALTHMANAGEMENT"
+    "/_layouts/15/doc2.aspx"
+    "?sourcedoc=%7B71E72CAB-A1FA-4975-8E22-139EE2EE2BB2%7D"
+    "&file=FORMATO%20FONDOS%20PUBLICOS%203420.xlsx"
     "&action=default&mobileredirect=true"
 )
 
