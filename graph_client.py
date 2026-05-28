@@ -10,6 +10,7 @@ Datos cacheados en %LOCALAPPDATA%\\PolizasAExcel3420\\asesores_cache.json
 import base64
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -42,8 +43,13 @@ SP_FILE_URL = (
 ASESORES_SHEET = "LISTA OFICIAL"
 ASESORES_RANGE = "A2:C500"
 
-# ── Rutas locales ──────────────────────────────────────────────────────────────
-_LOCAL_DIR      = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "PolizasAExcel3420"
+# ── Rutas locales — junto al exe (o al script en desarrollo) ──────────────────
+def _app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+_LOCAL_DIR      = _app_dir()
 _CACHE_TOKEN    = _LOCAL_DIR / "token_cache.bin"
 _CACHE_ASESORES = _LOCAL_DIR / "asesores_cache.json"
 
