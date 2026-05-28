@@ -1,3 +1,17 @@
+import os
+import sys
+
+# ── SSL fix para PyInstaller onefile ──────────────────────────────────────────
+# certifi/cacert.pem se extrae al dir temporal; hay que apuntar requests/msal a él.
+if getattr(sys, "frozen", False):
+    try:
+        import certifi as _certifi
+        _ca = _certifi.where()
+        os.environ.setdefault("SSL_CERT_FILE",       _ca)
+        os.environ.setdefault("REQUESTS_CA_BUNDLE",  _ca)
+    except Exception:
+        pass
+
 import tkinter as tk
 from tkinter import ttk
 
@@ -5,9 +19,7 @@ import base64
 import hashlib
 import io
 import json
-import os
 import re
-import sys
 import threading
 from datetime import datetime, timezone, timedelta, date
 from pathlib import Path

@@ -112,6 +112,7 @@ echo [6/7] Compilando Polizas a Excel 3420.exe...
   --hidden-import openpyxl ^
   --hidden-import msal ^
   --hidden-import msal_extensions ^
+  --collect-data certifi ^
   app.py >> "%LOG%" 2>&1
 
 if exist "dist\Polizas a Excel 3420.exe" (
