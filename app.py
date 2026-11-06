@@ -39,7 +39,7 @@ import update_manager
 import graph_client
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 LIMA_TZ = timezone(timedelta(hours=-5), name="PET")
 
 
@@ -123,7 +123,7 @@ def parse_tasa(raw: str) -> str:
 
 
 # ── Claude ─────────────────────────────────────────────────────────────────────
-CLAUDE_MODEL = "claude-sonnet-4-5"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 PROMPT = """Analiza esta imagen de una póliza bursátil y extrae SOLO los datos indicados.
 
